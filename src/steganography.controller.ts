@@ -28,9 +28,9 @@ export class SteganographyController {
   @Post('encode')
   @UseInterceptors(FileInterceptor('image')) // 'image' là tên field trong form-data
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ description: 'Image file and secret message', type: EncodeDto })
+  @ApiBody({ description: 'Image file, secret message, and password', type: EncodeDto })
   @ApiResponse({ status: 201, description: 'Returns the encoded image file.' })
-  @ApiResponse({ status: 400, description: 'Bad Request (e.g., missing file, message too long, invalid image).' })
+  @ApiResponse({ status: 400, description: 'Bad Request (e.g., missing file/password, message too long, invalid image, weak password).' })
   @ApiResponse({ status: 500, description: 'Internal Server Error.' })
   async encode(
     @UploadedFile(
@@ -43,14 +43,16 @@ export class SteganographyController {
         }),
     )
     image: Express.Multer.File,
-    @Body() body: EncodeDto, // Nhận toàn bộ body dưới dạng EncodeDto
+    @Body() body: EncodeDto, // Nhận toàn bộ body DTO
     @Res({ passthrough: true }) res: Response, // Sử dụng passthrough để tự quản lý response
   ): Promise<any> { // Sử dụng StreamableFile thay vì any để rõ ràng hơn
     let encodedImagePath: string | null = null;
     let tempInputPath: string | null = null;
-    const message = body.message; // Lấy message từ body DTO
+    // Lấy message và password từ body DTO
+    const { message, password } = body;
     try {
-        const result = await this.steganographyService.encode(image, message);
+        // Truyền password vào service
+        const result = await this.steganographyService.encode(image, message, password);
         encodedImagePath = result.encodedImagePath;
         tempInputPath = result.tempInputPath;
 
@@ -102,9 +104,9 @@ export class SteganographyController {
   @Post('decode')
   @UseInterceptors(FileInterceptor('image'))
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ description: 'Stego image file to decode', type: DecodeDto })
+  @ApiBody({ description: 'Stego image file and password to decode', type: DecodeDto })
   @ApiResponse({ status: 200, description: 'Returns the hidden message.', schema: { type: 'object', properties: { message: { type: 'string' } } } })
-  @ApiResponse({ status: 400, description: 'Bad Request (e.g., missing file, no message found, invalid image).' })
+  @ApiResponse({ status: 400, description: 'Bad Request (e.g., missing file/password, incorrect password, corrupted data, invalid image).' })
   @ApiResponse({ status: 500, description: 'Internal Server Error.' })
   async decode(
      @UploadedFile(
@@ -117,10 +119,13 @@ export class SteganographyController {
         }),
     )
     image: Express.Multer.File,
+    @Body() body: DecodeDto, // Nhận cả body để lấy password
   ): Promise<{ message: string }> {
     let tempInputPath: string | null = null;
+    const { password } = body; // Lấy password từ body
     try {
-      const result = await this.steganographyService.decode(image);
+      // Truyền password vào service
+      const result = await this.steganographyService.decode(image, password);
       tempInputPath = result.tempInputPath;
       return { message: result.message };
     } catch (error) {

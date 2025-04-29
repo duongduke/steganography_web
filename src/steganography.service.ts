@@ -42,6 +42,7 @@ export class SteganographyService {
   async encode(
     image: Express.Multer.File,
     message: string,
+    password: string,
   ): Promise<{ encodedImagePath: string; tempInputPath: string }> {
     if (!image) {
         throw new BadRequestException('Image file is required.');
@@ -49,39 +50,40 @@ export class SteganographyService {
      if (!message) {
         throw new BadRequestException('Message is required.');
     }
+     if (!password) {
+         throw new BadRequestException('Password is required.');
+     }
 
-    await this.ensureTempDirExists(); // Đảm bảo thư mục tạm tồn tại
+    await this.ensureTempDirExists();
 
     const tempInputId = uuidv4();
     const originalExt = path.extname(image.originalname);
-    // Lưu file input tạm thời
     const tempInputPath = path.join(TEMP_DIR, `${tempInputId}${originalExt}`);
-    // Tạo tên file output (ưu tiên .png)
     const tempOutputPath = path.join(TEMP_DIR, `${tempInputId}_encoded.png`);
 
     try {
-        // Ghi buffer ảnh vào file tạm
         await fs.writeFile(tempInputPath, image.buffer);
-
-        // Đường dẫn tới script encode
         const encodeScriptPath = path.join(SCRIPTS_DIR, 'encode.py');
 
-        this.logger.log(`Executing: ${this.pythonExecutable} ${encodeScriptPath} ${tempInputPath} ${tempOutputPath} "${message.substring(0,50)}..."`); // Log rút gọn message
+        this.logger.log(`Executing encode script for input: ${tempInputPath}`); // Log gọn hơn
 
-        // Gọi script Python
+        // Gọi script Python với password
         const { stdout, stderr } = await execFilePromise(
             this.pythonExecutable,
-            [encodeScriptPath, tempInputPath, tempOutputPath, message],
-             { encoding: 'utf8' } // Quan trọng: Đảm bảo đọc stdout/stderr đúng encoding
+            [encodeScriptPath, tempInputPath, tempOutputPath, message, password],
+             { encoding: 'utf8' }
         );
 
         if (stderr) {
             this.logger.error(`Python stderr (encode): ${stderr}`);
-            // Cố gắng dọn dẹp file input
             await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Failed to delete temp input file: ${tempInputPath}`, e.stack));
-            // Phân tích lỗi từ Python để trả về lỗi cụ thể hơn nếu có thể
-             if (stderr.includes("Message is too long")) {
-                throw new BadRequestException('Message is too long to hide in this image.');
+            // Bổ sung kiểm tra lỗi mã hóa/dung lượng
+             if (stderr.includes("Encryption error")) {
+                 throw new InternalServerErrorException('Failed to encrypt message.');
+             } else if (stderr.includes("Encrypted message + EOM is too long")) {
+                throw new BadRequestException('Encrypted message is too long to hide in this image.');
+            } else if (stderr.includes("Message is too long")) { // Lỗi này không nên xảy ra nữa
+                throw new BadRequestException('Message is too long (pre-encryption check failed - should not happen).');
             } else if (stderr.includes("file not found")) {
                  throw new InternalServerErrorException('Could not process image: Input file error.');
             } else if (stderr.includes("Error opening image")) {
@@ -90,41 +92,42 @@ export class SteganographyService {
             throw new InternalServerErrorException('Failed to encode image. Check server logs.');
         }
 
-        // stdout mong đợi là đường dẫn file output
         const encodedImagePath = stdout.trim();
          this.logger.log(`Python stdout (encode): ${encodedImagePath}`);
 
-        // Kiểm tra xem đường dẫn trả về có khớp không (tùy chọn)
          if (!encodedImagePath || !encodedImagePath.includes(tempOutputPath)) {
              this.logger.error(`Unexpected stdout from encode.py: ${stdout}`);
               await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Failed to delete temp input file: ${tempInputPath}`, e.stack));
-             await fs.unlink(tempOutputPath).catch(e => this.logger.warn(`Failed to delete temp output file: ${tempOutputPath}`, e.stack));
+             // Cố gắng xóa output nếu script tạo ra sai đường dẫn
+              if(encodedImagePath && await fs.access(encodedImagePath).then(() => true).catch(() => false)) {
+                   await fs.unlink(encodedImagePath).catch(e => this.logger.warn(`Failed to delete unexpected output file: ${encodedImagePath}`, e.stack));
+              }
+             // Xóa cả output path dự kiến nếu nó tồn tại
+             await fs.unlink(tempOutputPath).catch(e => this.logger.warn(`Failed to delete expected temp output file: ${tempOutputPath}`, e.stack));
              throw new InternalServerErrorException('Encoding script returned unexpected output.');
          }
 
-
         this.logger.log(`Encoded image saved to: ${encodedImagePath}`);
-        // Trả về đường dẫn file đã mã hóa VÀ file input tạm để controller xóa sau khi gửi response
         return { encodedImagePath, tempInputPath };
 
     } catch (error) {
         this.logger.error(`Error during encoding: ${error.message}`, error.stack);
-        // Cố gắng dọn dẹp file nếu có lỗi
         await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Cleanup failed (encode error): Could not delete ${tempInputPath}`, e.stack));
         await fs.unlink(tempOutputPath).catch(e => this.logger.warn(`Cleanup failed (encode error): Could not delete ${tempOutputPath}`, e.stack));
-
         if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
-            throw error; // Ném lại lỗi đã được xử lý
+            throw error;
         }
-        // Lỗi không mong muốn khác (ví dụ: execFile lỗi)
         throw new InternalServerErrorException('An unexpected error occurred during encoding.');
     }
   }
 
-  async decode(image: Express.Multer.File): Promise<{ message: string; tempInputPath: string }> {
+  async decode(image: Express.Multer.File, password: string): Promise<{ message: string; tempInputPath: string }> {
      if (!image) {
         throw new BadRequestException('Image file is required.');
     }
+     if (!password) {
+         throw new BadRequestException('Password is required.');
+     }
      await this.ensureTempDirExists();
 
     const tempInputId = uuidv4();
@@ -132,52 +135,48 @@ export class SteganographyService {
     const tempInputPath = path.join(TEMP_DIR, `${tempInputId}${originalExt}`);
 
     try {
-        // Ghi buffer ảnh vào file tạm
         await fs.writeFile(tempInputPath, image.buffer);
-
-        // Đường dẫn tới script decode
         const decodeScriptPath = path.join(SCRIPTS_DIR, 'decode.py');
 
-        this.logger.log(`Executing: ${this.pythonExecutable} ${decodeScriptPath} ${tempInputPath}`);
+        this.logger.log(`Executing decode script for input: ${tempInputPath}`);
 
-        // Gọi script Python
+        // Gọi script Python với password
         const { stdout, stderr } = await execFilePromise(
             this.pythonExecutable,
-             [decodeScriptPath, tempInputPath],
+             [decodeScriptPath, tempInputPath, password],
              { encoding: 'utf8' }
              );
 
         if (stderr) {
             this.logger.error(`Python stderr (decode): ${stderr}`);
              await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Failed to delete temp input file: ${tempInputPath}`, e.stack));
-              if (stderr.includes("End-of-message marker not found")) {
+              // Phân tích lỗi giải mã/EOM
+               if (stderr.includes("Decryption failed")) {
+                   throw new BadRequestException('Decryption failed. Incorrect password or corrupted data.');
+               } else if (stderr.includes("End-of-message marker not found")) {
                 throw new BadRequestException('No hidden message found or image data is corrupted.');
               } else if (stderr.includes("file not found")) {
                  throw new InternalServerErrorException('Could not process image: Input file error.');
              } else if (stderr.includes("Error opening image")) {
                  throw new BadRequestException('Invalid or corrupted image file.');
+             } else if (stderr.includes("Could not decode decrypted data")){
+                  throw new InternalServerErrorException('Failed to decode decrypted data (possibly corrupted or not text).');
              }
             throw new InternalServerErrorException('Failed to decode image. Check server logs.');
         }
 
-        // stdout mong đợi là thông điệp giải mã
         const decodedMessage = stdout.trim();
-         this.logger.log(`Python stdout (decode): ${decodedMessage.substring(0,100)}...`); // Log rút gọn
-
+         this.logger.log(`Python stdout (decode): [message hidden in logs]`); // Không log message giải mã ra
 
         this.logger.log('Decoding successful.');
-        // Trả về thông điệp và đường dẫn file input tạm để controller xóa
         return { message: decodedMessage, tempInputPath };
 
     } catch (error) {
         this.logger.error(`Error during decoding: ${error.message}`, error.stack);
-        // Cố gắng dọn dẹp file nếu có lỗi
         await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Cleanup failed (decode error): Could not delete ${tempInputPath}`, e.stack));
-
-         if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
-            throw error; // Ném lại lỗi đã được xử lý
+        if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+            throw error;
         }
-        // Lỗi không mong muốn khác
         throw new InternalServerErrorException('An unexpected error occurred during decoding.');
     }
   }
@@ -186,9 +185,16 @@ export class SteganographyService {
   async cleanupFiles(paths: string[]): Promise<void> {
     for (const filePath of paths) {
         if (filePath) { // Chỉ xóa nếu đường dẫn tồn tại
-            await fs.unlink(filePath).catch(err => {
-                this.logger.warn(`Failed to clean up temporary file: ${filePath}`, err.stack);
-            });
+            try {
+                await fs.access(filePath); // Kiểm tra file tồn tại trước khi xóa
+                await fs.unlink(filePath);
+                this.logger.log(`Cleaned up temp file: ${filePath}`);
+             } catch (err) {
+                 // Bỏ qua lỗi nếu file không tồn tại (có thể đã bị xóa hoặc chưa bao giờ tạo)
+                 if (err.code !== 'ENOENT') {
+                     this.logger.warn(`Failed to clean up temporary file: ${filePath}`, err.stack);
+                 }
+             }
         }
     }
   }
