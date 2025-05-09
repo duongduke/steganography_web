@@ -28,7 +28,29 @@ export class SteganographyController {
   @Post('encode')
   @UseInterceptors(FileInterceptor('image')) // 'image' là tên field trong form-data
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ description: 'Image file, secret message, and password', type: EncodeDto })
+  @ApiBody({
+    description: 'Image file, secret message, and password',
+    schema: {
+      type: 'object',
+      required: ['image', 'message', 'password'],
+      properties: {
+        image: {
+          type: 'string',
+          format: 'binary',
+          description: 'Image file (PNG only)',
+        },
+        message: {
+          type: 'string',
+          description: 'Secret message to hide',
+        },
+        password: {
+          type: 'string',
+          description: 'Password for encryption (min 6 characters)',
+          minLength: 6,
+        },
+      },
+    },
+  })
   @ApiResponse({ status: 201, description: 'Returns the encoded image file.' })
   @ApiResponse({ status: 400, description: 'Bad Request (e.g., missing file/password, message too long, invalid image, weak password).' })
   @ApiResponse({ status: 500, description: 'Internal Server Error.' })
@@ -43,7 +65,7 @@ export class SteganographyController {
         }),
     )
     image: Express.Multer.File,
-    @Body() body: EncodeDto, // Nhận toàn bộ body DTO
+    @Body() body: EncodeDto, // Nhận toàn bộ body DTO (message, password)
     @Res({ passthrough: true }) res: Response, // Sử dụng passthrough để tự quản lý response
   ): Promise<any> { // Sử dụng StreamableFile thay vì any để rõ ràng hơn
     let encodedImagePath: string | null = null;
@@ -104,7 +126,25 @@ export class SteganographyController {
   @Post('decode')
   @UseInterceptors(FileInterceptor('image'))
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ description: 'Stego image file and password to decode', type: DecodeDto })
+  @ApiBody({
+    description: 'Stego image file and password to decode',
+    schema: {
+      type: 'object',
+      required: ['image', 'password'],
+      properties: {
+        image: {
+          type: 'string',
+          format: 'binary',
+          description: 'Stego image file (PNG only)',
+        },
+        password: {
+          type: 'string',
+          description: 'Password for decryption (min 6 characters)',
+          minLength: 6,
+        },
+      },
+    },
+  })
   @ApiResponse({ status: 200, description: 'Returns the hidden message.', schema: { type: 'object', properties: { message: { type: 'string' } } } })
   @ApiResponse({ status: 400, description: 'Bad Request (e.g., missing file/password, incorrect password, corrupted data, invalid image).' })
   @ApiResponse({ status: 500, description: 'Internal Server Error.' })

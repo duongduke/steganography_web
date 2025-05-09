@@ -130,54 +130,67 @@ export class SteganographyService {
      }
      await this.ensureTempDirExists();
 
-    const tempInputId = uuidv4();
-    const originalExt = path.extname(image.originalname);
-    const tempInputPath = path.join(TEMP_DIR, `${tempInputId}${originalExt}`);
-
+    let tempInputPath: string | null = null; // Đảm bảo khai báo ở phạm vi có thể truy cập trong finally/catch
     try {
+        tempInputPath = path.join(TEMP_DIR, `${uuidv4()}${path.extname(image.originalname)}`);
         await fs.writeFile(tempInputPath, image.buffer);
         const decodeScriptPath = path.join(SCRIPTS_DIR, 'decode.py');
-
         this.logger.log(`Executing decode script for input: ${tempInputPath}`);
 
-        // Gọi script Python với password
-        const { stdout, stderr } = await execFilePromise(
+        // execFilePromise sẽ resolve nếu script thoát với mã 0
+        // và reject nếu script thoát với mã khác 0.
+        const { stdout } = await execFilePromise(
             this.pythonExecutable,
-             [decodeScriptPath, tempInputPath, password],
-             { encoding: 'utf8' }
-             );
-
-        if (stderr) {
-            this.logger.error(`Python stderr (decode): ${stderr}`);
-             await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Failed to delete temp input file: ${tempInputPath}`, e.stack));
-              // Phân tích lỗi giải mã/EOM
-               if (stderr.includes("Decryption failed")) {
-                   throw new BadRequestException('Decryption failed. Incorrect password or corrupted data.');
-               } else if (stderr.includes("End-of-message marker not found")) {
-                throw new BadRequestException('No hidden message found or image data is corrupted.');
-              } else if (stderr.includes("file not found")) {
-                 throw new InternalServerErrorException('Could not process image: Input file error.');
-             } else if (stderr.includes("Error opening image")) {
-                 throw new BadRequestException('Invalid or corrupted image file.');
-             } else if (stderr.includes("Could not decode decrypted data")){
-                  throw new InternalServerErrorException('Failed to decode decrypted data (possibly corrupted or not text).');
-             }
-            throw new InternalServerErrorException('Failed to decode image. Check server logs.');
-        }
+            [decodeScriptPath, tempInputPath, password],
+            { encoding: 'utf8' }
+        );
+        // Nếu code chạy đến đây, nghĩa là script Python đã thành công (exit code 0) và không có stderr đáng kể.
+        // Tuy nhiên, để cẩn thận, một số script vẫn có thể in ra stderr ngay cả khi thành công.
+        // Trong trường hợp của chúng ta, lsb_util.py thiết kế để in lỗi ra stderr và exit(1).
+        // Nên nếu đến đây mà có stderr thì cũng lạ, nhưng cứ để logic xử lý stderr ở catch.
 
         const decodedMessage = stdout.trim();
-         this.logger.log(`Python stdout (decode): [message hidden in logs]`); // Không log message giải mã ra
-
+        this.logger.log(`Python stdout (decode): [message hidden in logs]`);
         this.logger.log('Decoding successful.');
         return { message: decodedMessage, tempInputPath };
 
-    } catch (error) {
-        this.logger.error(`Error during decoding: ${error.message}`, error.stack);
-        await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Cleanup failed (decode error): Could not delete ${tempInputPath}`, e.stack));
-        if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
-            throw error;
+    } catch (error) { // error ở đây có thể là lỗi từ fs.writeFile hoặc lỗi từ execFilePromise (khi script Python thoát với mã lỗi)
+        this.logger.error(`Error during decoding execution: ${error.message}`, error.stack);
+
+        // Kiểm tra xem lỗi có phải từ child_process và chứa stderr không
+        // Thuộc tính stderr có thể nằm trong error.stderr hoặc error.message (tùy cách promisify)
+        const pythonStderr = error.stderr || ''; // Lấy stderr từ lỗi, nếu có
+
+        if (pythonStderr) {
+            this.logger.error(`Python stderr (decode from caught error): ${pythonStderr}`);
+            // Phân tích stderr để đưa ra lỗi cụ thể hơn
+            if (pythonStderr.toLowerCase().includes("decryption failed") || pythonStderr.includes("MAC check failed") || pythonStderr.includes("Incorrect password or corrupted data")) {
+                throw new BadRequestException('Decryption failed. Incorrect password or corrupted data.');
+            } else if (pythonStderr.includes("End-of-message marker not found")) {
+                throw new BadRequestException('No hidden message found or image data is corrupted.');
+            } else if (pythonStderr.includes("file not found")) {
+                 throw new InternalServerErrorException('Could not process image: Input file error.');
+            } else if (pythonStderr.includes("Error opening image")) {
+                 throw new BadRequestException('Invalid or corrupted image file.');
+            } else if (pythonStderr.includes("Could not decode decrypted data")){
+                  throw new InternalServerErrorException('Failed to decode decrypted data (possibly corrupted or not text).');
+            }
+            // Nếu stderr có nội dung nhưng không khớp các lỗi trên, coi là lỗi script không xác định
+            throw new InternalServerErrorException('Failed to decode image due to a script error. Check server logs for Python stderr.');
         }
-        throw new InternalServerErrorException('An unexpected error occurred during decoding.');
+
+        // Nếu lỗi không phải là lỗi từ script Python có stderr, hoặc là một lỗi khác đã được ném (ví dụ từ fs.writeFile)
+        if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+            throw error; // Ném lại nếu đã là lỗi HTTP được xử lý
+        }
+        
+        // Lỗi không mong muốn khác
+        throw new InternalServerErrorException('An unexpected error occurred during decoding processing.');
+    } finally {
+        // Dọn dẹp file input tạm trong mọi trường hợp (thành công hoặc thất bại)
+        if (tempInputPath && await fs.access(tempInputPath).then(() => true).catch(() => false)) {
+            await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Cleanup failed (decode finally): Could not delete ${tempInputPath}`, e.stack));
+        }
     }
   }
 
