@@ -43,6 +43,8 @@ export class SteganographyService {
     image: Express.Multer.File,
     message: string,
     password: string,
+    outputFormat?: string,
+    outputFilename?: string,
   ): Promise<{ encodedImagePath: string; tempInputPath: string }> {
     if (!image) {
         throw new BadRequestException('Image file is required.');
@@ -59,7 +61,12 @@ export class SteganographyService {
     const tempInputId = uuidv4();
     const originalExt = path.extname(image.originalname);
     const tempInputPath = path.join(TEMP_DIR, `${tempInputId}${originalExt}`);
-    const tempOutputPath = path.join(TEMP_DIR, `${tempInputId}_encoded.png`);
+    
+    // Xác định định dạng đầu ra
+    const format = outputFormat || 'png';
+    // Nếu có tên file tùy chọn, sử dụng nó thay vì tempInputId
+    const outputBaseName = outputFilename || `${tempInputId}_encoded`;
+    const tempOutputPath = path.join(TEMP_DIR, `${outputBaseName}.${format}`);
 
     try {
         await fs.writeFile(tempInputPath, image.buffer);
@@ -67,11 +74,30 @@ export class SteganographyService {
 
         this.logger.log(`Executing encode script for input: ${tempInputPath}`); // Log gọn hơn
 
-        // Gọi script Python với password
+        // Gọi script Python với password và thêm tham số mới nếu có
+        const scriptParams = [
+            encodeScriptPath, 
+            tempInputPath, 
+            tempOutputPath, 
+            message, 
+            password
+        ];
+        
+        // Thêm tham số định dạng nếu được chỉ định
+        if (outputFormat) {
+            scriptParams.push(outputFormat);
+            
+            // Thêm tham số tên file nếu được chỉ định
+            if (outputFilename) {
+                scriptParams.push(outputFilename);
+            }
+        }
+        
+        // Thực thi script
         const { stdout, stderr } = await execFilePromise(
             this.pythonExecutable,
-            [encodeScriptPath, tempInputPath, tempOutputPath, message, password],
-             { encoding: 'utf8' }
+            scriptParams,
+            { encoding: 'utf8' }
         );
 
         if (stderr) {
@@ -88,6 +114,10 @@ export class SteganographyService {
                  throw new InternalServerErrorException('Could not process image: Input file error.');
             } else if (stderr.includes("Error opening image")) {
                  throw new BadRequestException('Invalid or corrupted image file.');
+            } else if (stderr.includes("Image format") && stderr.includes("is not suitable")) {
+                throw new BadRequestException('This image format is not suitable for steganography due to lossy compression.');
+            } else if (stderr.includes("Image format") && stderr.includes("is not officially supported")) {
+                throw new BadRequestException('This image format is not officially supported for steganography.');
             }
             throw new InternalServerErrorException('Failed to encode image. Check server logs.');
         }
@@ -95,7 +125,7 @@ export class SteganographyService {
         const encodedImagePath = stdout.trim();
          this.logger.log(`Python stdout (encode): ${encodedImagePath}`);
 
-         if (!encodedImagePath || !encodedImagePath.includes(tempOutputPath)) {
+         if (!encodedImagePath || !encodedImagePath.includes(outputBaseName)) {
              this.logger.error(`Unexpected stdout from encode.py: ${stdout}`);
               await fs.unlink(tempInputPath).catch(e => this.logger.warn(`Failed to delete temp input file: ${tempInputPath}`, e.stack));
              // Cố gắng xóa output nếu script tạo ra sai đường dẫn
@@ -174,6 +204,10 @@ export class SteganographyService {
                  throw new BadRequestException('Invalid or corrupted image file.');
             } else if (pythonStderr.includes("Could not decode decrypted data")){
                   throw new InternalServerErrorException('Failed to decode decrypted data (possibly corrupted or not text).');
+            } else if (pythonStderr.includes("Image format") && pythonStderr.includes("is not suitable")) {
+                throw new BadRequestException('This image format is not suitable for steganography due to lossy compression.');
+            } else if (pythonStderr.includes("Image format") && pythonStderr.includes("is not officially supported")) {
+                throw new BadRequestException('This image format is not officially supported for steganography.');
             }
             // Nếu stderr có nội dung nhưng không khớp các lỗi trên, coi là lỗi script không xác định
             throw new InternalServerErrorException('Failed to decode image due to a script error. Check server logs for Python stderr.');

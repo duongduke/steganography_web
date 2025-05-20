@@ -10,6 +10,22 @@ from Crypto.Random import get_random_bytes
 # Chuyển thành list các số nguyên (byte)
 EOM_MARKER_BYTES = [0, 0, 0, 0, 0, 0, 0, 0] # 8 byte null làm dấu hiệu
 
+# Định dạng ảnh hỗ trợ và các tùy chọn đặc biệt cho từng định dạng
+SUPPORTED_FORMATS = ['PNG', 'BMP', 'TIFF', 'RAW']
+LOSSY_FORMATS = ['JPEG', 'JPG', 'WEBP', 'HEIF', 'HEIC', 'AVIF']
+
+# Cấu hình lưu cho các định dạng khác nhau
+FORMAT_SAVE_OPTIONS = {
+    'TIFF': {'compression': 'raw'}, # Không nén cho TIFF
+    'PNG': {'compress_level': 0},   # Mức nén thấp nhất cho PNG
+    'BMP': {},                      # Không có tùy chọn đặc biệt cho BMP
+    'RAW': {},                      # Không có tùy chọn đặc biệt cho RAW
+}
+
+# Thêm header để nhận dạng dữ liệu ẩn
+STEGO_HEADER = b'STEGO'
+HEADER_VERSION = 1  # Phiên bản của thuật toán
+
 # --- AES Encryption/Decryption Functions ---
 SALT_SIZE = 16 # Kích thước salt cho PBKDF2
 KEY_SIZE = 32 # Kích thước khóa AES (256-bit)
@@ -68,10 +84,34 @@ def msg_to_bin(msg):
         # vì đầu vào luôn là bytes đã mã hóa
         raise TypeError("Input must be bytes or bytearray")
 
-def hide_data(image_path, secret_message, output_path, password):
-    """Giấu dữ liệu đã mã hóa vào ảnh."""
+def check_image_format(image_path):
+    """Kiểm tra định dạng ảnh và trả về thông tin về khả năng hỗ trợ LSB."""
     try:
-        img = Image.open(image_path, 'r').convert('RGB')
+        img = Image.open(image_path)
+        img_format = img.format
+        
+        if img_format in SUPPORTED_FORMATS:
+            return True, f"Image format {img_format} is supported for LSB steganography."
+        elif img_format in LOSSY_FORMATS:
+            return False, f"Image format {img_format} is not suitable for LSB steganography due to lossy compression."
+        else:
+            return False, f"Image format {img_format} is not officially supported for LSB steganography."
+    except FileNotFoundError:
+        return False, f"Error: Input image file not found at {image_path}"
+    except Exception as e:
+        return False, f"Error opening image: {e}"
+
+def hide_data(image_path, secret_message, output_path, password, output_format="png"):
+    """Giấu dữ liệu đã mã hóa vào ảnh."""
+    # Kiểm tra định dạng ảnh đầu vào
+    is_supported, message = check_image_format(image_path)
+    if not is_supported:
+        print(message, file=sys.stderr)
+        sys.exit(1)
+        
+    try:
+        # Mở ảnh và chuyển thành RGB, không quan tâm đến alpha channel
+        img = Image.open(image_path).convert('RGB')
     except FileNotFoundError:
         print(f"Error: Input image file not found at {image_path}", file=sys.stderr)
         sys.exit(1)
@@ -103,49 +143,80 @@ def hide_data(image_path, secret_message, output_path, password):
         print(f"Error: Encrypted message + EOM is too long ({len(data_to_hide)} bytes). Max capacity: {max_bytes_capacity} bytes.", file=sys.stderr)
         sys.exit(1)
 
+    # 5. Tạo một bản sao của ảnh gốc để làm việc
+    new_img = Image.new('RGB', img.size)
+    pixels = list(img.getdata())
+    new_pixels = []
     data_index = 0
-    img_data = list(img.getdata())
-    new_img_data = []
 
-    # 5. Nhúng dữ liệu nhị phân vào LSB
-    for pixel in img_data:
+    # 6. Nhúng dữ liệu nhị phân vào LSB
+    for i, pixel in enumerate(pixels):
         r, g, b = pixel
         new_r, new_g, new_b = r, g, b
+
+        # Chỉ thay đổi các pixel cho đến khi tất cả dữ liệu được nhúng
         if data_index < data_len_bits:
             new_r = (r & ~1) | int(binary_data_to_hide[data_index])
             data_index += 1
+        
         if data_index < data_len_bits:
             new_g = (g & ~1) | int(binary_data_to_hide[data_index])
             data_index += 1
+            
         if data_index < data_len_bits:
             new_b = (b & ~1) | int(binary_data_to_hide[data_index])
             data_index += 1
-        new_img_data.append((new_r, new_g, new_b))
-        if data_index >= data_len_bits:
-            remaining_pixels = img_data[len(new_img_data):]
-            new_img_data.extend(remaining_pixels)
+            
+        new_pixels.append((new_r, new_g, new_b))
+        
+        # Nếu đã nhúng hết dữ liệu, giữ nguyên các pixel còn lại
+        if data_index >= data_len_bits and i < len(pixels) - 1:
+            new_pixels.extend(pixels[i+1:])
             break
 
-    # 6. Tạo và lưu ảnh mới
-    new_img = Image.new(img.mode, img.size)
-    new_img.putdata(new_img_data)
-    try:
-        save_format = 'PNG' # Luôn lưu PNG để đảm bảo LSB
-        output_path_png = output_path
-        if not output_path_png.lower().endswith('.png'):
-             base = os.path.splitext(output_path_png)[0]
-             output_path_png = base + '.png'
+    # 7. Đặt dữ liệu pixel mới cho ảnh
+    new_img.putdata(new_pixels)
 
-        new_img.save(output_path_png, format=save_format)
-        print(output_path_png) # In đường dẫn file output
+    try:
+        # Xác định định dạng đầu ra
+        output_format = output_format.upper()
+        if output_format not in SUPPORTED_FORMATS:
+            print(f"Warning: Unsupported output format '{output_format}'. Using PNG as default.", file=sys.stderr)
+            output_format = "PNG"
+            
+        # Đảm bảo phần mở rộng file đúng với định dạng
+        base, ext = os.path.splitext(output_path)
+        correct_ext = f".{output_format.lower()}"
+        
+        # Nếu không có phần mở rộng hoặc phần mở rộng không khớp với định dạng, sửa lại
+        if not ext or ext.lower() != correct_ext:
+            output_path = base + correct_ext
+
+        # Lấy tùy chọn lưu trữ cho định dạng được chọn
+        save_options = FORMAT_SAVE_OPTIONS.get(output_format, {})
+        
+        # Đối với TIFF, đảm bảo lưu ở chế độ không nén để giữ nguyên LSB
+        if output_format == 'TIFF':
+            new_img.save(output_path, format=output_format, compression='raw')
+        else:
+            # Đối với các định dạng khác, sử dụng tùy chọn mặc định
+            new_img.save(output_path, format=output_format, **save_options)
+            
+        print(output_path) # In đường dẫn file output
     except Exception as e:
         print(f"Error saving image: {e}", file=sys.stderr)
         sys.exit(1)
 
 def reveal_data(image_path, password):
     """Trích xuất và giải mã dữ liệu từ ảnh."""
+    # Kiểm tra định dạng ảnh đầu vào
+    is_supported, message = check_image_format(image_path)
+    if not is_supported:
+        print(message, file=sys.stderr)
+        sys.exit(1)
+        
     try:
-        img = Image.open(image_path, 'r').convert('RGB')
+        img = Image.open(image_path).convert('RGB')
     except FileNotFoundError:
         print(f"Error: Input image file not found at {image_path}", file=sys.stderr)
         sys.exit(1)
@@ -154,21 +225,23 @@ def reveal_data(image_path, password):
         sys.exit(1)
 
     binary_data = ""
-    img_data = img.getdata()
+    pixels = img.getdata()
     # Chuẩn bị EOM marker dạng binary để so sánh
     eom_marker_bin = msg_to_bin(bytes(EOM_MARKER_BYTES))
     eom_len = len(eom_marker_bin)
 
     # 1. Trích xuất LSB cho đến khi gặp EOM marker
-    for pixel in img_data:
+    for pixel in pixels:
         r, g, b = pixel
-        binary_data += format(r, '08b')[-1]
+        binary_data += str(r & 1)  # Lấy LSB của kênh đỏ
         if len(binary_data) >= eom_len and binary_data[-eom_len:] == eom_marker_bin:
             break
-        binary_data += format(g, '08b')[-1]
+            
+        binary_data += str(g & 1)  # Lấy LSB của kênh xanh lá
         if len(binary_data) >= eom_len and binary_data[-eom_len:] == eom_marker_bin:
             break
-        binary_data += format(b, '08b')[-1]
+            
+        binary_data += str(b & 1)  # Lấy LSB của kênh xanh dương
         if len(binary_data) >= eom_len and binary_data[-eom_len:] == eom_marker_bin:
             break
 
@@ -182,17 +255,15 @@ def reveal_data(image_path, password):
     # 3. Chuyển chuỗi bit trích xuất thành bytes
     encrypted_bytes = bytearray()
     for i in range(0, len(binary_data_extracted), 8):
-        byte = binary_data_extracted[i:i+8]
-        # Quan trọng: Chỉ thêm nếu là byte hoàn chỉnh
-        if len(byte) == 8:
+        # Chỉ xử lý đủ 8 bit tạo thành 1 byte
+        if i + 8 <= len(binary_data_extracted):
+            byte = binary_data_extracted[i:i+8]
             try:
-                 encrypted_bytes.append(int(byte, 2))
+                encrypted_bytes.append(int(byte, 2))
             except ValueError:
-                 # Should not happen if extraction logic is correct
-                 print(f"Warning: Invalid byte sequence encountered during conversion: {byte}", file=sys.stderr)
-                 continue # Bỏ qua byte lỗi
-        # else: # Không nên xảy ra nếu EOM được tìm thấy đúng
-             # print(f"Warning: Incomplete byte sequence at the end: {byte}", file=sys.stderr)
+                print(f"Warning: Invalid byte sequence encountered: {byte}", file=sys.stderr)
+                # Bỏ qua byte lỗi và tiếp tục
+                continue
 
     if not encrypted_bytes:
          print("Error: No valid encrypted data could be extracted before EOM.", file=sys.stderr)
@@ -213,4 +284,4 @@ def reveal_data(image_path, password):
          sys.exit(1)
     except Exception as e:
         print(f"Unexpected error during decryption or decoding: {e}", file=sys.stderr)
-        sys.exit(1) 
+        sys.exit(1)

@@ -37,7 +37,7 @@ export class SteganographyController {
         image: {
           type: 'string',
           format: 'binary',
-          description: 'Image file (PNG only)',
+          description: 'Image file (PNG, BMP, TIFF, or RAW recommended)',
         },
         message: {
           type: 'string',
@@ -47,6 +47,15 @@ export class SteganographyController {
           type: 'string',
           description: 'Password for encryption (min 6 characters)',
           minLength: 6,
+        },
+        outputFormat: {
+          type: 'string',
+          description: 'Output image format (default: png)',
+          enum: ['png', 'bmp', 'tiff', 'raw'],
+        },
+        outputFilename: {
+          type: 'string',
+          description: 'Custom filename for output image (without extension)',
         },
       },
     },
@@ -59,22 +68,29 @@ export class SteganographyController {
         new ParseFilePipe({
             validators: [
                 // new MaxFileSizeValidator({ maxSize: 10000000 }), // Ví dụ: Giới hạn 10MB
-                new FileTypeValidator({ fileType: 'image/png' }), // Chỉ chấp nhận PNG
+                // Không giới hạn định dạng ảnh đầu vào, Python script sẽ kiểm tra
+                // new FileTypeValidator({ fileType: 'image/png' }),
             ],
              fileIsRequired: true,
         }),
     )
     image: Express.Multer.File,
-    @Body() body: EncodeDto, // Nhận toàn bộ body DTO (message, password)
+    @Body() body: EncodeDto, // Nhận toàn bộ body DTO (message, password, outputFormat, outputFilename)
     @Res({ passthrough: true }) res: Response, // Sử dụng passthrough để tự quản lý response
   ): Promise<any> { // Sử dụng StreamableFile thay vì any để rõ ràng hơn
     let encodedImagePath: string | null = null;
     let tempInputPath: string | null = null;
-    // Lấy message và password từ body DTO
-    const { message, password } = body;
+    // Lấy message, password và các tham số tùy chọn từ body DTO
+    const { message, password, outputFormat, outputFilename } = body;
     try {
-        // Truyền password vào service
-        const result = await this.steganographyService.encode(image, message, password);
+        // Truyền các tham số mới vào service
+        const result = await this.steganographyService.encode(
+            image, 
+            message, 
+            password, 
+            outputFormat, 
+            outputFilename
+        );
         encodedImagePath = result.encodedImagePath;
         tempInputPath = result.tempInputPath;
 
@@ -84,8 +100,25 @@ export class SteganographyController {
         // Lấy tên file từ đường dẫn để gợi ý trình duyệt lưu file
         const filename = encodedImagePath.split(require('path').sep).pop();
 
+        // Xác định Content-Type dựa vào định dạng file
+        let contentType = 'image/png'; // Mặc định
+        if (outputFormat) {
+            switch(outputFormat.toLowerCase()) {
+                case 'bmp':
+                    contentType = 'image/bmp';
+                    break;
+                case 'tiff':
+                    contentType = 'image/tiff';
+                    break;
+                case 'raw':
+                    contentType = 'image/x-raw';
+                    break;
+                // Mặc định là PNG
+            }
+        }
+
         // Set headers để trình duyệt tải file về thay vì hiển thị
-        res.setHeader('Content-Type', 'image/png');
+        res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
         res.status(HttpStatus.CREATED);
 
@@ -135,7 +168,7 @@ export class SteganographyController {
         image: {
           type: 'string',
           format: 'binary',
-          description: 'Stego image file (PNG only)',
+          description: 'Stego image file (PNG, BMP, TIFF, or RAW)',
         },
         password: {
           type: 'string',
@@ -153,7 +186,8 @@ export class SteganographyController {
         new ParseFilePipe({
             validators: [
                 // new MaxFileSizeValidator({ maxSize: 10000000 }),
-                new FileTypeValidator({ fileType: 'image/png' }), // Chỉ chấp nhận PNG
+                // Không giới hạn định dạng ảnh đầu vào, Python script sẽ kiểm tra
+                // new FileTypeValidator({ fileType: 'image/png' }),
             ],
             fileIsRequired: true,
         }),

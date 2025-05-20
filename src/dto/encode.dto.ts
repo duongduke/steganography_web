@@ -1,15 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsNotEmpty, IsString, MinLength, IsOptional, IsIn } from 'class-validator';
 
-export class EncodeDto {
-  // Thuộc tính 'image' được xử lý bởi FileInterceptor và @UploadedFile(), không cần trong DTO body.
-  // @ApiProperty({
-  //   type: 'string',
-  //   format: 'binary',
-  //   required: true,
-  //   description: 'Image file (PNG recommended)',
-  // })
-  // image: any; 
+export class EncodeDto { 
 
   @ApiProperty({
     type: 'string',
@@ -30,4 +22,25 @@ export class EncodeDto {
   @IsNotEmpty()
   @MinLength(6)
   password: string;
+
+  @ApiProperty({
+    type: 'string',
+    required: false,
+    description: 'Output image format (PNG, BMP, TIFF, RAW)',
+    default: 'png',
+    enum: ['png', 'bmp', 'tiff', 'raw']
+  })
+  @IsString()
+  @IsOptional()
+  @IsIn(['png', 'bmp', 'tiff', 'raw'])
+  outputFormat?: string;
+
+  @ApiProperty({
+    type: 'string',
+    required: false,
+    description: 'Custom filename for output image (without extension)',
+  })
+  @IsString()
+  @IsOptional()
+  outputFilename?: string;
 } 
